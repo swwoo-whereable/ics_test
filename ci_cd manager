@@ -1,0 +1,620 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import paramiko
+import os
+import threading
+from pathlib import Path
+import time
+
+class VehicleFileDistributor:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.window.title("차량 파일 배포 시스템")
+        self.window.geometry("800x600")
+        
+        # 차량 설정 (halow IP로만 구분)
+        self.vehicles = {
+            '192.168.100.151': 'Vehicle 1',
+            '192.168.100.152': 'Vehicle 2',
+            '192.168.100.153': 'Vehicle 3',
+            '192.168.100.154': 'Vehicle 4',
+            '192.168.100.155': 'Vehicle 5',
+            '192.168.100.156': 'Vehicle 6'
+        }
+        
+        # 로컬 네트워크 설정
+        self.local_network = {
+            'viu': {
+                'ip': '192.168.1.31',
+                'username': 'whereable',
+                'password': 'whereable'
+            },
+            'adcu1': {
+                'ip': '192.168.1.41',
+                'username': 'aaeon',
+                'password': 'aaeon'
+            },
+            'adcu2': {
+                'ip': '192.168.1.42',
+                'username': 'aaeon',
+                'password': 'aaeon'
+            }
+        }
+        # GUI 변수들
+        self.file_path = tk.StringVar()
+        self.dest_path = tk.StringVar(value="/home/aaeon/")
+        self.source_vehicle = tk.StringVar(value='192.168.100.151')
+        self.progress_var = tk.StringVar(value="대기 중...")
+        
+        # UI 컴포넌트 저장을 위한 딕셔너리
+        self.ui_components = {}
+        
+        self.distribution_thread = None
+        self.stop_distribution = False
+        
+        # 배포 통계 추가
+        self.distribution_stats = {
+            'total': 0,
+            'success': 0, 
+            'failed': 0
+        }
+        
+        self.setup_gui()
+
+    def setup_gui(self):
+        # 소스 차량 선택
+        source_frame = ttk.LabelFrame(self.window, text="소스 차량 선택", padding="10")
+        source_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(source_frame, text="배포 소스 차량:").pack(side=tk.LEFT, padx=5)
+        vehicle_combo = ttk.Combobox(source_frame, textvariable=self.source_vehicle,
+                                   values=list(self.vehicles.keys()))
+        vehicle_combo.pack(side=tk.LEFT, padx=5)
+        self.ui_components['vehicle_combo'] = vehicle_combo
+
+        # 파일/폴더 선택
+        file_frame = ttk.LabelFrame(self.window, text="파일/폴더 선택", padding="10")
+        file_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        self.file_entry = ttk.Entry(file_frame, textvariable=self.file_path, width=60)
+        self.file_entry.pack(side=tk.LEFT, padx=5)
+        self.ui_components['file_entry'] = self.file_entry
+
+        browse_btn = ttk.Button(file_frame, text="찾아보기", command=self.browse_path)
+        browse_btn.pack(side=tk.LEFT, padx=2)
+        self.ui_components['browse_btn'] = browse_btn
+
+        # 배포 타겟 선택 프레임
+        target_frame = ttk.LabelFrame(self.window, text="배포 대상 선택", padding="10")
+        target_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # 체크박스들을 담을 프레임
+        checkbox_frame = ttk.Frame(target_frame)
+        checkbox_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.viu_var = tk.BooleanVar(value=False)
+        self.adcu1_var = tk.BooleanVar(value=False)
+        self.adcu2_var = tk.BooleanVar(value=False)
+
+        # VIU 체크박스와 경로 설정
+        viu_frame = ttk.Frame(checkbox_frame)
+        viu_frame.pack(fill=tk.X, pady=2)
+        viu_cb = ttk.Checkbutton(viu_frame, text="VIU (Windows)", 
+                        variable=self.viu_var, 
+                        command=self.toggle_path_entries)
+        viu_cb.pack(side=tk.LEFT, padx=10)
+        self.ui_components['viu_cb'] = viu_cb
+        
+        # VIU 경로 입력 프레임
+        self.viu_path_frame = ttk.Frame(viu_frame)
+        self.viu_path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.viu_path_var = tk.StringVar(value="C:\\Users\\whereable\\Desktop")
+        self.viu_path_entry = ttk.Entry(self.viu_path_frame, textvariable=self.viu_path_var, width=40)
+        self.viu_path_entry.pack(side=tk.LEFT, padx=5)
+        self.ui_components['viu_path_entry'] = self.viu_path_entry
+        
+        viu_path_btn = ttk.Button(self.viu_path_frame, text="경로 선택", 
+                   command=lambda: self.select_windows_path(self.viu_path_var))
+        viu_path_btn.pack(side=tk.LEFT)
+        self.ui_components['viu_path_btn'] = viu_path_btn
+        
+        self.viu_path_frame.pack_forget()  # 초기에는 숨김
+
+        # ADCU 체크박스와 경로 설정
+        adcu_frame = ttk.Frame(checkbox_frame)
+        adcu_frame.pack(fill=tk.X, pady=2)
+        adcu1_cb = ttk.Checkbutton(adcu_frame, text="ADCU1 (Linux)", 
+                        variable=self.adcu1_var,
+                        command=self.toggle_path_entries)
+        adcu1_cb.pack(side=tk.LEFT, padx=10)
+        self.ui_components['adcu1_cb'] = adcu1_cb
+        
+        adcu2_cb = ttk.Checkbutton(adcu_frame, text="ADCU2 (Linux)", 
+                        variable=self.adcu2_var,
+                        command=self.toggle_path_entries)
+        adcu2_cb.pack(side=tk.LEFT, padx=10)
+        self.ui_components['adcu2_cb'] = adcu2_cb
+
+        # ADCU 경로 입력 프레임
+        self.adcu_path_frame = ttk.Frame(adcu_frame)
+        self.adcu_path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.adcu_path_var = tk.StringVar(value="/home/aaeon/")
+        ttk.Label(self.adcu_path_frame, text="Linux 경로:").pack(side=tk.LEFT, padx=5)
+        self.adcu_path_entry = ttk.Entry(self.adcu_path_frame, textvariable=self.adcu_path_var, width=40)
+        self.adcu_path_entry.pack(side=tk.LEFT, padx=5)
+        self.ui_components['adcu_path_entry'] = self.adcu_path_entry
+        self.adcu_path_frame.pack_forget()  # 초기에는 숨김
+
+        # 진행 상황
+        progress_frame = ttk.LabelFrame(self.window, text="진행 상황", padding="10")
+        progress_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        self.progress = ttk.Progressbar(progress_frame, length=300, mode='determinate')
+        self.progress.pack(pady=5)
+        
+        ttk.Label(progress_frame, textvariable=self.progress_var).pack(pady=5)
+
+        # 배포 시작/중단 버튼 프레임
+        button_frame = ttk.Frame(self.window)
+        button_frame.pack(pady=10)
+        
+        self.start_btn = ttk.Button(button_frame, text="배포 시작", command=self.start_distribution)
+        self.start_btn.pack(side=tk.LEFT, padx=5)
+        self.ui_components['start_btn'] = self.start_btn
+        
+        self.stop_btn = ttk.Button(button_frame, text="배포 중단", command=self.stop_distribution_thread, state='disabled')
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
+        self.ui_components['stop_btn'] = self.stop_btn
+
+        # 로그 창
+        log_frame = ttk.LabelFrame(self.window, text="로그", padding="10")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 로그 텍스트 영역과 스크롤바
+        self.log_text = tk.Text(log_frame, height=10, width=70)
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def browse_path(self):
+        """파일과 폴더 모두 선택 가능한 통합 브라우저"""
+        path = filedialog.askopenfilename(title="파일 선택") or \
+               filedialog.askdirectory(title="폴더 선택")
+        if path:
+            self.file_path.set(path)
+
+    def toggle_ui_state(self, enabled=True):
+        """UI 컴포넌트들의 활성화/비활성화 상태를 토글"""
+        state = 'normal' if enabled else 'disabled'
+        for component in self.ui_components.values():
+            try:
+                component['state'] = state
+            except tk.TclError:
+                # 일부 위젯은 state 속성을 지원하지 않을 수 있음
+                pass
+
+    def format_log_message(self, message, level='info'):
+        """로그 메시지 포맷팅"""
+        timestamp = time.strftime("%H:%M:%S")
+        
+        # 심볼 매핑
+        symbols = {
+            'header': '■',
+            'info': '►',
+            'success': '✓',
+            'error': '✗',
+            'vehicle': ''  # 심볼 제거
+        }
+        
+        prefix = symbols.get(level, '►')
+        
+        # 특별한 포맷팅이 필요한 메시지 처리
+        if level == 'header':
+            return f"\n[{timestamp}] {prefix} {message}"
+        elif level == 'vehicle':
+            return f"\n[{timestamp}] {'=' * 20} {message} {'=' * 20}"  # 줄바꿈 추가 및 심볼 제거
+        else:
+            return f"[{timestamp}] {prefix} {message}"
+
+    def log(self, message, level='info'):
+        formatted_message = self.format_log_message(message, level)
+        self.log_text.insert(tk.END, f"{formatted_message}\n")
+        self.log_text.see(tk.END)
+        self.window.update()
+
+    def validate_path(self, path):
+        """경로 유효성 검사"""
+        if not path.startswith('/'):
+            raise ValueError("절대 경로를 입력해주세요")
+        if '..' in path:
+            raise ValueError("상대 경로는 사용할 수 없습니다")
+
+    def ensure_remote_path(self, ssh, path):
+        """원격 경로가 없을 경우 생성"""
+        try:
+            cmd = f'mkdir -p {path}'
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            error = stderr.read().decode()
+            if error:
+                raise Exception(error)
+        except Exception as e:
+            self.log(f"경로 생성 중 오류: {str(e)}", 'error')
+            raise
+
+    def transfer_folder(self, sftp, local_path, remote_base):
+        """폴더 전체 전송"""
+        try:
+            for root, dirs, files in os.walk(local_path):
+                for dir_name in dirs:
+                    local_dir = os.path.join(root, dir_name)
+                    remote_dir = os.path.join(remote_base, 
+                        os.path.relpath(local_dir, local_path))
+                    try:
+                        sftp.mkdir(remote_dir)
+                    except IOError:
+                        pass  # 디렉토리가 이미 존재하는 경우
+
+                for file_name in files:
+                    local_file = os.path.join(root, file_name)
+                    remote_file = os.path.join(remote_base, 
+                        os.path.relpath(local_file, local_path))
+                    sftp.put(local_file, remote_file)
+        except Exception as e:
+            raise Exception(f"폴더 전송 중 오류: {str(e)}")
+
+    def toggle_path_entries(self):
+        """체크박스 상태에 따라 경로 입력 필드 표시/숨김"""
+        if self.viu_var.get():
+            self.viu_path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        else:
+            self.viu_path_frame.pack_forget()
+
+        if self.adcu1_var.get() or self.adcu2_var.get():
+            self.adcu_path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        else:
+            self.adcu_path_frame.pack_forget()
+
+    def select_windows_path(self, path_var):
+        """Windows 스타일 경로 선택"""
+        folder = filedialog.askdirectory()
+        if folder:
+            # Unix 스타일 경로를 Windows 스타일로 변환
+            windows_path = folder.replace('/', '\\')
+            path_var.set(windows_path)
+
+    def deploy_to_local_devices(self, source_path):
+        self.distribution_stats['total'] += 2  # ADCU1과 ADCU2
+        results = {'adcu1': '미시도', 'adcu2': '미시도'}
+        
+        try:
+            if self.stop_distribution:
+                return results
+
+            if self.adcu1_var.get() or self.adcu2_var.get():
+                linux_path = self.adcu_path_var.get()
+                if not linux_path.startswith('/'):
+                    raise ValueError("Linux 경로는 '/'로 시작해야 합니다.")
+
+            # ADCU1로 전송
+            if self.adcu1_var.get():
+                try:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    self.log("ADCU1 연결 시도 중...")
+                    
+                    ssh.connect(
+                        self.local_network['adcu1']['ip'],
+                        username=self.local_network['adcu1']['username'],
+                        password=self.local_network['adcu1']['password'],
+                        timeout=3
+                    )
+                    
+                    self.ensure_remote_path(ssh, self.adcu_path_var.get())
+                    sftp = ssh.open_sftp()
+                    remote_path = os.path.join(self.adcu_path_var.get(), os.path.basename(source_path))
+                    
+                    if os.path.isfile(source_path):
+                        sftp.put(source_path, remote_path)
+                    else:
+                        self.transfer_folder(sftp, source_path, remote_path)
+                    
+                    results['adcu1'] = '성공'
+                    self.distribution_stats['success'] += 1
+                    self.log("ADCU1 전송 완료", 'success')
+                    
+                except Exception as e:
+                    results['adcu1'] = f'실패: {str(e)}'
+                    self.distribution_stats['failed'] += 1
+                    self.log(f"ADCU1 전송 실패: {str(e)}", 'error')
+                finally:
+                    if 'sftp' in locals(): sftp.close()
+                    if 'ssh' in locals(): ssh.close()
+
+            # ADCU2로 전송
+            if self.adcu2_var.get():
+                try:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    self.log("ADCU2 연결 시도 중...")
+                    ssh.connect(
+                        self.local_network['adcu2']['ip'],
+                        username=self.local_network['adcu2']['username'],
+                        password=self.local_network['adcu2']['password'],
+                        timeout=3
+                    )
+                    
+                    self.ensure_remote_path(ssh, self.adcu_path_var.get())
+                    sftp = ssh.open_sftp()
+                    remote_path = os.path.join(self.adcu_path_var.get(), os.path.basename(source_path))
+                    
+                    if os.path.isfile(source_path):
+                        sftp.put(source_path, remote_path)
+                    else:
+                        self.transfer_folder(sftp, source_path, remote_path)
+                    
+                    results['adcu2'] = '성공'
+                    self.distribution_stats['success'] += 1
+                    self.log("ADCU2 전송 완료", 'success')
+                    
+                except Exception as e:
+                    results['adcu2'] = f'실패: {str(e)}'
+                    self.distribution_stats['failed'] += 1
+                    self.log(f"ADCU2 전송 실패: {str(e)}", 'error')
+                finally:
+                    if 'sftp' in locals(): sftp.close()
+                    if 'ssh' in locals(): ssh.close()
+
+            return results
+
+        except Exception as e:
+            self.log(f"로컬 배포 중 오류: {str(e)}", 'error')
+            return results
+
+    def deploy_to_remote_vehicle(self, target_halow, source_path):
+        selected_targets = sum([self.adcu1_var.get(), self.adcu2_var.get(), self.viu_var.get()])
+        self.distribution_stats['total'] += selected_targets
+        
+        results = {'adcu1': '미시도', 'viu': '미시도', 'adcu2': '미시도'}
+        
+        if self.stop_distribution:
+            return results
+
+        try:
+            if self.adcu1_var.get() or self.adcu2_var.get():
+                linux_path = self.adcu_path_var.get()
+                if not linux_path.startswith('/'):
+                    raise ValueError("Linux 경로는 '/'로 시작해야 합니다.")
+
+            local_ssh = paramiko.SSHClient()
+            local_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.log(f"[{target_halow}] 로컬 ADCU1 연결 시도...")
+            
+            local_ssh.connect(
+                self.local_network['adcu1']['ip'],
+                username=self.local_network['adcu1']['username'],
+                password=self.local_network['adcu1']['password'],
+                timeout=3
+            )
+
+            # 임시 경로��� 공통으로 생성
+            temp_path = f"/tmp/transfer_{int(time.time())}"
+            
+            if self.adcu1_var.get():
+                try:
+                    self.log(f"[{target_halow}] ADCU1 halow 전송 시도...")
+                    
+                    cmd = f'ssh aaeon@{target_halow} "mkdir -p {self.adcu_path_var.get()}"'
+                    stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                    error = stderr.read().decode()
+                    if error and "yes/no" in error:
+                        stdin.write("yes\n")
+                        stdin.flush()
+                    if error and "yes/no" not in error:
+                        raise Exception(error)
+                    
+                    cmd = f'scp -r {source_path} aaeon@{target_halow}:{temp_path}'
+                    stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                    
+                    error = stderr.read().decode()
+                    if error and "yes/no" in error:
+                        stdin.write("yes\n")
+                        stdin.flush()
+                    
+                    if error and "yes/no" not in error:
+                        raise Exception(error)
+                    
+                    results['adcu1'] = '성공'
+                    self.distribution_stats['success'] += 1
+                    self.log(f"[{target_halow}] ADCU1 전송 완료", 'success')
+
+                    if self.viu_var.get():
+                        self.log(f"[{target_halow}] VIU 전송 시도...")
+                        windows_path = self.viu_path_var.get()
+                        scp_path = windows_path.replace('\\', '/')
+                        
+                        cmd = f'ssh aaeon@{target_halow} "ssh whereable@192.168.1.31 mkdir -p {scp_path}"'
+                        stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                        error = stderr.read().decode()
+                        if error and "yes/no" not in error:
+                            raise Exception(error)
+                            
+                        cmd = f'ssh aaeon@{target_halow} "scp -r {temp_path} whereable@192.168.1.31:{scp_path}"'
+                        stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                        error = stderr.read().decode()
+                        
+                        if error and "yes/no" in error:
+                            stdin.write("yes\n")
+                            stdin.flush()
+                        
+                        if error and "yes/no" not in error:
+                            results['viu'] = f'실패: {error}'
+                            self.distribution_stats['failed'] += 1
+                            self.log(f"[{target_halow}] VIU 전송 실패: {error}", 'error')
+                        else:
+                            results['viu'] = '성공'
+                            self.distribution_stats['success'] += 1
+                            self.log(f"[{target_halow}] VIU 전송 완료", 'success')
+
+                    if self.adcu2_var.get():
+                        self.log(f"[{target_halow}] ADCU2 전송 시도...")
+                        cmd = f'ssh aaeon@{target_halow} "ssh aaeon@192.168.1.42 mkdir -p {self.adcu_path_var.get()}"'
+                        stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                        error = stderr.read().decode()
+                        if error and "yes/no" not in error:
+                            raise Exception(error)
+                            
+                        cmd = f'ssh aaeon@{target_halow} "scp -r {temp_path} aaeon@192.168.1.42:{self.adcu_path_var.get()}"'
+                        stdin, stdout, stderr = local_ssh.exec_command(cmd)
+                        error = stderr.read().decode()
+                        
+                        if error and "yes/no" in error:
+                            stdin.write("yes\n")
+                            stdin.flush()
+                        
+                        if error and "yes/no" not in error:
+                            results['adcu2'] = f'실패: {error}'
+                            self.distribution_stats['failed'] += 1
+                            self.log(f"[{target_halow}] ADCU2 전송 실패: {error}", 'error')
+                        else:
+                            results['adcu2'] = '성공'
+                            self.distribution_stats['success'] += 1
+                            self.log(f"[{target_halow}] ADCU2 전송 완료", 'success')
+
+                    local_ssh.exec_command(f'ssh aaeon@{target_halow} "rm -rf {temp_path}"')
+
+                except Exception as e:
+                    error_msg = str(e)
+                    results['adcu1'] = f'실패: {error_msg}'
+                    self.distribution_stats['failed'] += 1
+                    self.log(f"[{target_halow}] ADCU1 전송 실패: {error_msg}", 'error')
+
+            return results
+
+        except Exception as e:
+            self.log(f"[{target_halow}] 오류 발생: {str(e)}", 'error')
+            self.distribution_stats['failed'] += selected_targets
+            return results
+
+        finally:
+            if 'local_ssh' in locals():
+                local_ssh.close()
+
+    def display_final_summary(self):
+        """최종 배포 결과 표시"""
+        total = self.distribution_stats['total']
+        success = self.distribution_stats['success']
+        failed = self.distribution_stats['failed']
+        
+        if total > 0:
+            success_rate = (success/total*100)
+        else:
+            success_rate = 0
+            
+        summary = f"""
+{'='*50}
+배포 최종 결과
+{'='*50}
+총 배포 시도: {total}
+성공: {success}
+실패: {failed}
+성공률: {success_rate:.1f}%
+{'='*50}"""
+        
+        self.log(summary, 'header')
+
+    def stop_distribution_thread(self):
+        """배포 중단"""
+        self.stop_distribution = True
+        self.log("배포 중단 요청됨...", 'info')
+        self.stop_btn['state'] = 'disabled'
+
+    def start_distribution(self):
+        source_path = self.file_path.get()
+        if not source_path:
+            messagebox.showerror("오류", "파일 또는 폴더를 선택해주세요.")
+            return
+
+        if not os.path.exists(source_path):
+            messagebox.showerror("오류", "선택한 경로가 존재하지 않습니다.")
+            return
+
+        if not (self.viu_var.get() or self.adcu1_var.get() or self.adcu2_var.get()):
+            messagebox.showerror("오류", "최소 하나 이상의 배포 대상을 선택해주세요.")
+            return
+
+        try:
+            self.validate_path(self.dest_path.get())
+        except ValueError as e:
+            messagebox.showerror("오류", str(e))
+            return
+
+        def distribution_thread():
+            try:
+                self.stop_distribution = False
+                self.window.after(0, lambda: self.toggle_ui_state(False))
+                self.stop_btn['state'] = 'normal'
+                self.progress_var.set("배포 중...")
+                
+                self.progress['value'] = 0
+                source_halow = self.source_vehicle.get()
+                
+                # 로그 초기화
+                self.log_text.delete(1.0, tk.END)
+                
+                self.log("배포 프로세스 시작", 'header')
+                
+                if source_halow:
+                    self.log(f"소스 차량: {self.vehicles[source_halow]} ({source_halow})", 'vehicle')
+                
+                self.log("로컬 시스템 배포 시작", 'header')
+                local_results = self.deploy_to_local_devices(source_path)
+                
+                if self.stop_distribution:
+                    self.log("사용자 요청으로 배포가 중단되었습니다", 'error')
+                    return
+                
+                
+                
+                total_vehicles = len(self.vehicles) - 1
+                current_vehicle = 0
+                
+                for target_halow, vehicle_name in self.vehicles.items():
+                    if target_halow == source_halow or self.stop_distribution:
+                        continue
+                        
+                    self.log(f"차량 {vehicle_name} ({target_halow})", 'vehicle')
+                    
+                    self.log(f"차량 {vehicle_name} ({target_halow}) 배포 시작", 'header')
+                    results = self.deploy_to_remote_vehicle(target_halow, source_path)
+                    
+
+                    print()
+                    current_vehicle += 1
+                    self.progress['value'] = (current_vehicle / total_vehicles) * 100
+                    
+                
+                if not self.stop_distribution:
+                    self.log("\n모든 배포 완료", 'success')
+                    messagebox.showinfo("완료", "모든 차량에 대한 배포가 완료되었습니다.")
+                
+            except Exception as e:
+                self.log(f"오류 발생: {str(e)}", 'error')
+                messagebox.showerror("오류", f"배포 중 오류가 발생했습니다: {str(e)}")
+            
+            finally:
+                self.stop_distribution = False
+                self.window.after(0, lambda: self.toggle_ui_state(True))
+                self.stop_btn['state'] = 'disabled'
+                self.progress_var.set("대기 중...")
+
+        self.distribution_thread = threading.Thread(target=distribution_thread)
+        self.distribution_thread.start()
+
+    def run(self):
+        self.window.mainloop()
+
+if __name__ == "__main__":
+    app = VehicleFileDistributor()
+    app.run()
